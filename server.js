@@ -454,3 +454,114 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`面试大师API服务运行在 http://0.0.0.0:${PORT}`);
   console.log(`可从内外网访问: 内网192.168.5.110:${PORT} / 外网100.106.29.60:${PORT}`);
 });
+
+// ============ 答题记录API ============
+
+// 提交答题结果
+app.post('/api/answer', authMiddleware, (req, res) => {
+  const { questionId, selectedAnswer, isCorrect } = req.body;
+  
+  if (!questionId || !selectedAnswer) {
+    return res.status(400).json({ error: '参数不完整' });
+  }
+  
+  try {
+    // 记录错题
+    if (!isCorrect) {
+      const wrongId = uuidv4();
+      db.prepare('INSERT INTO wrong_answers (id, user_id, question_id, wrong_option) VALUES (?, ?, ?, ?)')
+        .run(wrongId, req.userId, questionId, selectedAnswer);
+    }
+    
+    // 更新进度
+    const existing = db.prepare('SELECT * FROM user_progress WHERE user_id = ? AND question_id = ?')
+      .get(req.userId, questionId);
+    
+    if (existing) {
+      db.prepare(`
+        UPDATE user_progress 
+        SET correct_count = correct_count + ?, wrong_count = wrong_count + ?, last_review = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND question_id = ?
+      `).run(isCorrect ? 1 : 0, isCorrect ? 0 : 1, req.userId, questionId);
+    } else {
+      const id = uuidv4();
+      db.prepare(`
+        INSERT INTO user_progress (id, user_id, question_id, correct_count, wrong_count, last_review)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `).run(id, req.userId, questionId, isCorrect ? 1 : 0, isCorrect ? 0 : 1);
+    }
+    
+    res.json({ success: true, isCorrect });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 收藏题目
+app.post('/api/favorite', authMiddleware, (req, res) => {
+  const { questionId, isFavorite } = req.body;
+  
+  const existing = db.prepare('SELECT * FROM user_progress WHERE user_id = ? AND question_id = ?')
+    .get(req.userId, questionId);
+  
+  if (existing) {
+    db.prepare('UPDATE user_progress SET is_favorite = ? WHERE user_id = ? AND question_id = ?')
+      .run(isFavorite ? 1 : 0, req.userId, questionId);
+  } else {
+    const id = uuidv4();
+    db.prepare(`
+      INSERT INTO user_progress (id, user_id, question_id, is_favorite, last_review)
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(id, req.userId, questionId, isFavorite ? 1 : 0);
+  }
+  
+  res.json({ success: true });
+});
+
+// 获取收藏
+app.get('/api/favorites', authMiddleware, (req, res) => {
+  const favorites = db.prepare(`
+    SELECT p.*, q.question, q.options, q.answer, q.explanation, q.category
+    FROM user_progress p
+    JOIN questions q ON p.question_id = q.id
+    WHERE p.user_id = ? AND p.is_favorite = 1
+    ORDER BY p.last_review DESC
+  `).all(req.userId);
+  
+  favorites.forEach(f => f.options = JSON.parse(f.options));
+  res.json(favorites);
+});
+
+// 公开题库查询（无需登录）
+app.get('/api/public/questions', (req, res) => {
+  const { category, difficulty, limit = 50 } = req.query;
+  let sql = 'SELECT id, category, difficulty, question, options, answer FROM questions';
+  const params = [];
+  const conditions = [];
+  
+  if (category && category !== 'all') {
+    conditions.push('category = ?');
+    params.push(category);
+  }
+  if (difficulty) {
+    conditions.push('difficulty = ?');
+    params.push(difficulty);
+  }
+  
+  if (conditions.length > 0) {
+    sql += ' WHERE ' + conditions.join(' AND ');
+  }
+  
+  sql += ' ORDER BY RANDOM() LIMIT ?';
+  params.push(parseInt(limit));
+  
+  const questions = db.prepare(sql).all(...params);
+  questions.forEach(q => q.options = JSON.parse(q.options));
+  res.json(questions);
+});
+
+// 公开分类
+app.get('/api/public/categories', (req, res) => {
+  const categories = db.prepare('SELECT DISTINCT category FROM questions ORDER BY category').all();
+  res.json(categories.map(c => c.category));
+});
