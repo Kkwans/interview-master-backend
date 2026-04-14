@@ -250,10 +250,77 @@ app.post('/api/articles', authMiddleware, (req, res) => {
   res.json({ success: true, id });
 });
 
-// 获取文章分类
+// 获取文章分类（支持二级分类）
 app.get('/api/article-categories', (req, res) => {
-  const categories = db.prepare('SELECT DISTINCT category FROM articles').all();
-  res.json(categories.map(c => c.category));
+  const categories = db.prepare('SELECT DISTINCT category, sub_category FROM articles WHERE category IS NOT NULL').all();
+  // 整理成树形结构
+  const catMap = {};
+  categories.forEach(c => {
+    if (!catMap[c.category]) catMap[c.category] = { name: c.category, children: [] };
+    if (c.sub_category) catMap[c.category].children.push(c.sub_category);
+  });
+  res.json(Object.values(catMap));
+});
+
+// 获取题库分类（支持二级分类）
+app.get('/api/categories', (req, res) => {
+  // 备用分类数据
+  const FALLBACK_CATEGORIES = {
+    'Java基础': ['语法基础', '面向对象', '集合框架', '异常处理', '泛型', '注解', '反射', 'IO流'],
+    'JVM': ['内存模型', '垃圾回收', '类加载', 'JVM调优', '性能监控'],
+    'JUC': ['线程基础', '同步机制', '并发工具', '线程池', 'AQS', 'CAS'],
+    'Redis': ['数据类型', '持久化', '复制', '集群', '缓存', '事务'],
+    'Kafka': ['架构原理', '生产者', '消费者', '集群'],
+    '计算机网络': ['TCP/IP', 'HTTP/HTTPS', 'DNS', 'Socket'],
+    '操作系统': ['进程线程', '内存管理', '文件系统'],
+    '数据库': ['MySQL', '索引', '事务', '优化', 'NoSQL'],
+    '设计模式': ['创建型', '结构型', '行为型'],
+    '数据结构': ['数组', '链表', '栈队列', '树', '图', '排序'],
+    'AI': ['LLM基础', 'Prompt工程', 'RAG', 'Agent'],
+    'Agent': ['AutoGen', 'LangChain', 'CrewAI', 'MCP'],
+    '前端': ['HTML/CSS', 'JavaScript', 'React', 'Vue', '小程序', '工程化', 'TypeScript', 'Nodejs']
+  };
+  
+  const categories = db.prepare('SELECT DISTINCT category, sub_category FROM questions').all();
+  const catMap = {};
+  
+  categories.forEach(c => {
+    if (!catMap[c.category]) {
+      catMap[c.category] = { name: c.category, children: [] };
+      // 如果数据库为空，使用备用数据
+      if (FALLBACK_CATEGORIES[c.category]) {
+        catMap[c.category].children = FALLBACK_CATEGORIES[c.category];
+      }
+    }
+    // 添加数据库中的sub_category
+    if (c.sub_category && !catMap[c.category].children.includes(c.sub_category)) {
+      catMap[c.category].children.push(c.sub_category);
+    }
+  });
+  
+  // 添加备用中可能有但数据库没有的
+  Object.keys(FALLBACK_CATEGORIES).forEach(cat => {
+    if (!catMap[cat]) {
+      catMap[cat] = { name: cat, children: FALLBACK_CATEGORIES[cat] };
+    }
+  });
+  
+  res.json(Object.values(catMap));
+});
+
+// 获取文章列表
+app.get('/api/articles', (req, res) => {
+  const { category, sub_category, limit = 20 } = req.query;
+  let sql = 'SELECT * FROM articles';
+  const params = [];
+  const conditions = [];
+  if (category) { conditions.push('category = ?'); params.push(category); }
+  if (sub_category) { conditions.push('sub_category = ?'); params.push(sub_category); }
+  if (conditions.length) sql += ' WHERE ' + conditions.join(' AND ');
+  sql += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(parseInt(limit));
+  const articles = db.prepare(sql).all(...params);
+  res.json(articles);
 });
 
 // ============ 用户进度API ============
@@ -310,6 +377,39 @@ app.get('/api/wrong-answers', authMiddleware, (req, res) => {
   
   wrongAnswers.forEach(w => w.options = JSON.parse(w.options));
   res.json(wrongAnswers);
+});
+
+// 同步错题从APP
+app.post('/api/user/wrong-sync', authMiddleware, async (req, res) => {
+  const { wrongQuestions } = req.body;
+  if (!wrongQuestions || !Array.isArray(wrongQuestions)) {
+    return res.status(400).json({ error: '无效数据' });
+  }
+  
+  try {
+    for (const wq of wrongQuestions) {
+      // 查找或创建题目
+      let question = db.prepare('SELECT id FROM questions WHERE id = ?').get(wq.question_id);
+      if (!question) continue;
+      
+      // 检查是否已有错题记录
+      const existing = db.prepare('SELECT * FROM wrong_answers WHERE user_id = ? AND question_id = ?')
+        .get(req.userId, wq.question_id);
+      
+      if (existing) {
+        // 更新错题次数
+        db.prepare('UPDATE wrong_answers SET wrong_count = ?, answered_at = ? WHERE id = ?')
+          .run(wq.wrong_count, new Date().toISOString(), existing.id);
+      } else {
+        // 新增错题记录
+        db.prepare('INSERT INTO wrong_answers (user_id, question_id, wrong_count, answered_at) VALUES (?, ?, ?, ?)')
+          .run(req.userId, wq.question_id, wq.wrong_count || 1, new Date().toISOString());
+      }
+    }
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: '同步失败' });
+  }
 });
 
 // ============ 模拟面试API ============
