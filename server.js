@@ -632,10 +632,10 @@ app.get('/api/favorites', authMiddleware, (req, res) => {
   res.json(favorites);
 });
 
-// 公开题库查询（无需登录）
+// 公开题库查询（支持三级分类筛选）
 app.get('/api/public/questions', (req, res) => {
-  const { category, difficulty, limit = 50 } = req.query;
-  let sql = 'SELECT id, category, difficulty, question, options, answer FROM questions';
+  const { category, sub_category, third_category, difficulty, limit = 50 } = req.query;
+  let sql = 'SELECT id, category, sub_category, third_category, difficulty, question, options, answer, explanation FROM questions';
   const params = [];
   const conditions = [];
   
@@ -643,7 +643,15 @@ app.get('/api/public/questions', (req, res) => {
     conditions.push('category = ?');
     params.push(category);
   }
-  if (difficulty) {
+  if (sub_category) {
+    conditions.push('sub_category = ?');
+    params.push(sub_category);
+  }
+  if (third_category) {
+    conditions.push('third_category = ?');
+    params.push(third_category);
+  }
+  if (difficulty && difficulty !== 'all') {
     conditions.push('difficulty = ?');
     params.push(difficulty);
   }
@@ -664,4 +672,171 @@ app.get('/api/public/questions', (req, res) => {
 app.get('/api/public/categories', (req, res) => {
   const categories = db.prepare('SELECT DISTINCT category FROM questions ORDER BY category').all();
   res.json(categories.map(c => c.category));
+});
+
+// 三级分类树API
+app.get('/api/category-tree', (req, res) => {
+  // 定义完整的三级分类体系
+  const CATEGORY_TREE = {
+    'Java基础': {
+      '语法基础': ['变量与类型', '运算符', '流程控制', '数组'],
+      '面向对象': ['类与对象', '继承与多态', '抽象类与接口', '内部类'],
+      '集合框架': ['List接口', 'Set接口', 'Map接口', 'Collections工具类'],
+      '异常处理': ['异常体系', 'try-catch', 'throws与throw', '自定义异常'],
+      '泛型': ['泛型类', '泛型方法', '泛型通配符', '类型擦除'],
+      '反射': ['Class对象', ' Constructor', 'Field', 'Method'],
+      'IO流': ['字节流', '字符流', '缓冲流', '对象序列化']
+    },
+    'JVM': {
+      '内存模型': ['程序计数器', 'Java虚拟机栈', '本地方法栈', '堆', '方法区'],
+      '垃圾回收': ['标记算法', '垃圾收集器', 'GC日志', '内存分配策略'],
+      '类加载': ['加载过程', '双亲委派', '类加载器', '自定义类加载器'],
+      'JVM调优': ['参数配置', 'JProfiler', 'MAT分析', 'JConsole'],
+      '性能监控': ['jstat', 'jmap', 'jstack', 'visualvm']
+    },
+    'JUC': {
+      '线程基础': ['Thread', 'Runnable', 'Callable', '线程状态'],
+      '同步机制': ['synchronized', 'volatile', 'final', 'static'],
+      '并发工具': ['CountDownLatch', 'CyclicBarrier', 'Semaphore', 'Exchanger'],
+      '线程池': ['ThreadPoolExecutor', 'Executors', 'Future', 'ScheduledExecutor'],
+      'AQS': ['AbstractQueuedSynchronizer', 'ReentrantLock', 'ReentrantReadWriteLock'],
+      'CAS': ['AtomicInteger', 'AtomicReference', 'LongAdder', 'CAS问题']
+    },
+    'Redis': {
+      '数据类型': ['String', 'Hash', 'List', 'Set', 'ZSet', 'Bitmap'],
+      '持久化': ['RDB', 'AOF', '混合持久化', '备份恢复'],
+      '复制': ['主从复制', '哨兵', '集群', ' Jedis/Redisson'],
+      '缓存': ['缓存策略', '缓存穿透', '缓存击穿', '缓存雪崩'],
+      '事务': ['MULTI/EXEC', 'Watch', 'Lua脚本', 'pipeline']
+    },
+    'Kafka': {
+      '架构原理': ['broker', 'topic', 'partition', 'offset', 'replica'],
+      '生产者': ['发送流程', '分区策略', 'acks', '幂等性'],
+      '消费者': ['消费组', 'offset管理', '再均衡', '拦截器'],
+      '集群': ['Controller', 'ISR', '日志同步', ' Leader选举']
+    },
+    '计算机网络': {
+      'TCP/IP': ['TCP三次握手', 'TCP四次挥手', 'TCP状态转换', '粘包拆包'],
+      'HTTP': ['请求格式', '响应码', 'HTTPS', 'HTTP/2/HTTP/3'],
+      'DNS': ['域名解析', 'DNS缓存', 'CDN', 'DNS劫持'],
+      'Socket': ['BIO', 'NIO', 'AIO', 'Netty']
+    },
+    '操作系统': {
+      '进程线程': ['进程', '线程', '协程', '用户态/内核态'],
+      '内存管理': ['虚拟内存', '分页/分段', '页面置换', '内存泄漏'],
+      '文件系统': ['inode', '目录结构', '文件系统类型', 'IO调度']
+    },
+    '数据库': {
+      'MySQL': ['存储引擎', '日志系统', '事务隔离级别', '锁机制'],
+      '索引': ['B+树索引', 'Hash索引', '全文索引', '索引优化'],
+      '事务': ['ACID', 'redo日志', 'undo日志', '分布式事务'],
+      '优化': ['EXPLAIN', '慢查询', 'SQL优化', '结构优化'],
+      'NoSQL': ['MongoDB', 'ElasticSearch', 'HBase', 'Neo4j']
+    },
+    '设计模式': {
+      '创建型': ['单例', '工厂方法', '抽象工厂', '建造者', '原型'],
+      '结构型': ['适配器', '装饰器', '代理', '外观', '组合', '桥接'],
+      '行为型': ['观察者', '策略', '模板方法', '责任链', '迭代器', '命令']
+    },
+    '数据结构': {
+      '数组': ['顺序结构', '查找', '排序', '动态数组'],
+      '链表': ['单向链表', '双向链表', '循环链表', 'LRU缓存'],
+      '栈队列': ['顺序栈', '链式栈', '循环队列', '阻塞队列'],
+      '树': ['二叉树', '二叉搜索树', '平衡树', '红黑树', 'B树', 'B+树'],
+      '图': ['邻接矩阵', '邻接表', 'DFS/BFS', '最短路径', '拓扑排序'],
+      '排序': ['冒泡/选择', '插入', '归并', '快速', '堆', '计数']
+    },
+    'AI': {
+      'LLM基础': ['Transformer', 'GPT', 'Claude', 'Gemini', 'Embedding'],
+      'Prompt工程': ['提示词技巧', 'Few-shot', 'CoT', 'ReAct'],
+      'RAG': ['向量数据库', '文档切分', '检索排序', 'Hybrid Search'],
+      'Agent': ['规划能力', '工具使用', '记忆机制', 'Agent框架']
+    },
+    'Agent': {
+      'AutoGen': ['Agent设计', '对话模式', '工具集成', '团队协作'],
+      'LangChain': ['LCEL', 'Tool/Agent', 'Memory', 'Chain'],
+      'CrewAI': ['Roles', 'Tasks', 'Process', 'Memory'],
+      'MCP': ['Server', 'Client', '协议', '最佳实践']
+    },
+    '前端': {
+      'HTML/CSS': ['标签', '盒模型', 'Flex', 'Grid', '响应式'],
+      'JavaScript': ['数据类型', '函数', '原型', '异步', 'DOM'],
+      'React': ['组件', 'Hooks', '状态管理', 'Virtual DOM'],
+      'Vue': ['响应式', '指令', '组件', 'Composition API'],
+      '工程化': ['Webpack', 'Vite', 'ESLint', '单元测试']
+    },
+    '数据算法': {
+      '机器学习': ['监督学习', '无监督学习', '深度学习', '特征工程'],
+      'NLP': ['分词', 'NER', '文本分类', '情感分析'],
+      '推荐系统': ['协同过滤', '内容推荐', '召回', '排序'],
+      '搜索': ['倒排索引', 'ES', 'IK分词', '搜索排序']
+    }
+  };
+  res.json(CATEGORY_TREE);
+});
+
+// 获取分类下的文章列表
+app.get('/api/articles-by-category', (req, res) => {
+  const { category, sub_category, limit = 20 } = req.query;
+  let sql = 'SELECT id, category, title, source, created_at FROM articles';
+  const params = [];
+  const conditions = [];
+  
+  if (category) {
+    conditions.push('category = ?');
+    params.push(category);
+  }
+  if (sub_category) {
+    conditions.push('sub_category = ?');
+    params.push(sub_category);
+  }
+  
+  if (conditions.length > 0) {
+    sql += ' WHERE ' + conditions.join(' AND ');
+  }
+  sql += ' ORDER BY created_at DESC LIMIT ?';
+  params.push(parseInt(limit));
+  
+  try {
+    const articles = db.prepare(sql).all(...params);
+    res.json(articles);
+  } catch (e) {
+    // 表中没有sub_category字段，返回空数组
+    res.json([]);
+  }
+});
+
+// 获取分类下的题目（支持三级分类）
+app.get('/api/questions-by-category', (req, res) => {
+  const { category, sub_category, third_category, limit = 50, difficulty } = req.query;
+  let sql = 'SELECT id, category, sub_category, third_category, difficulty, question, options, answer, explanation FROM questions';
+  const params = [];
+  const conditions = [];
+  
+  if (category) {
+    conditions.push('category = ?');
+    params.push(category);
+  }
+  if (sub_category) {
+    conditions.push('sub_category = ?');
+    params.push(sub_category);
+  }
+  if (third_category) {
+    conditions.push('third_category = ?');
+    params.push(third_category);
+  }
+  if (difficulty && difficulty !== 'all') {
+    conditions.push('difficulty = ?');
+    params.push(difficulty);
+  }
+  
+  if (conditions.length > 0) {
+    sql += ' WHERE ' + conditions.join(' AND ');
+  }
+  sql += ' ORDER BY RANDOM() LIMIT ?';
+  params.push(parseInt(limit));
+  
+  const questions = db.prepare(sql).all(...params);
+  questions.forEach(q => q.options = JSON.parse(q.options));
+  res.json(questions);
 });
